@@ -280,7 +280,7 @@ async function streamWorkersAIResponse(
 export class RPKIScoutAgent extends AIChatAgent<Env> {
   async onChatMessage(
     onFinish: StreamTextOnFinishCallback<ToolSet>,
-    options?: { abortSignal?: AbortSignal }
+    _options?: { abortSignal?: AbortSignal }
   ) {
     const encoder = new TextEncoder();
     const agent = this;
@@ -344,7 +344,7 @@ export class RPKIScoutAgent extends AIChatAgent<Env> {
                     const state = (agent.state ?? {}) as AgentState;
                     const watched = Array.isArray(state.watchedASNs) ? state.watchedASNs : [];
                     if (!watched.includes(report.asn)) {
-                      await agent.setState({
+                      agent.setState({
                         ...state,
                         watchedASNs: [...watched, report.asn],
                         [`audit_${report.asn}`]: report,
@@ -381,7 +381,7 @@ export class RPKIScoutAgent extends AIChatAgent<Env> {
 
             const explainResponse = (await env.AI.run(MODEL, {
               messages: explainMessages,
-              max_tokens: 512,
+              max_tokens: 768,
               stream: true,
             })) as ReadableStream;
 
