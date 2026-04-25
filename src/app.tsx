@@ -372,6 +372,88 @@ function AuditCard({ data }: { data: { success: boolean; report?: AuditReport } 
   );
 }
 
+// ── Tool card: analyseHijackRisk ──────────────────────────────────────────────
+
+interface HijackCandidate {
+  covering_prefix: string;
+  covering_origin?: number;
+  covering_rpki?: string;
+  specific_prefix: string;
+  specific_origin?: number;
+  specific_rpki?: string;
+  risk: string;
+  reason: string;
+}
+
+interface HijackAnalysisData {
+  success: boolean;
+  data?: {
+    hijack_candidates: HijackCandidate[];
+    total_checked: number;
+    total_flagged: number;
+  };
+}
+
+function HijackAnalysisCard({ data }: { data: HijackAnalysisData }) {
+  const result = data?.data;
+  if (!result) return null;
+
+  const riskColor: Record<string, string> = {
+    CRITICAL: "var(--red)",
+    HIGH:     "var(--red)",
+    MEDIUM:   "var(--amber)",
+    LOW:      "var(--dim)",
+  };
+
+  return (
+    <div className="tool-card events-card">
+      <div className="tool-card-header">
+        <span className="tool-card-icon" style={{ color: "var(--red)" }}>⊗</span>
+        <span className="tool-card-title">HIJACK VECTOR ANALYSIS · PREFIX TRIE</span>
+        <span className={`tool-card-tag ${result.total_flagged > 0 ? "tag-red" : "tag-green"}`}>
+          {result.total_flagged === 0
+            ? "NO VECTORS FOUND"
+            : `${result.total_flagged} of ${result.total_checked} FLAGGED`}
+        </span>
+      </div>
+
+      {result.total_flagged === 0 ? (
+        <div className="events-empty">
+          No more-specific hijack vectors detected across {result.total_checked} prefixes.
+        </div>
+      ) : (
+        <div className="anomaly-list">
+          {result.hijack_candidates.map((c, idx) => (
+            <div key={idx} className="anomaly-item">
+              <div className="anomaly-top">
+                <span
+                  className="anomaly-status"
+                  style={{
+                    color: riskColor[c.risk] ?? "var(--dim)",
+                    borderColor: riskColor[c.risk] ?? "var(--dim)",
+                  }}
+                >
+                  {c.risk}
+                </span>
+                <span className="anomaly-asn" style={{ fontSize: "10px" }}>
+                  {c.covering_prefix} → {c.specific_prefix}
+                </span>
+              </div>
+              <div className="anomaly-time">
+                Covering: AS{c.covering_origin ?? "?"} ({c.covering_rpki ?? "?"}) ·
+                More-specific: AS{c.specific_origin ?? "?"} ({c.specific_rpki ?? "?"})
+              </div>
+              <div className="anomaly-time" style={{ color: "var(--dim)", fontStyle: "italic" }}>
+                {c.reason}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Error card ─────────────────────────────────────────────────────────────────
 
 function ErrorCard({ toolName, error }: { toolName: string; error?: string }) {
@@ -396,6 +478,7 @@ const TOOL_LABELS: Record<string, string> = {
   getAnomalies: "Fetching traffic anomalies",
   getRealTimeRoutes: "Fetching real-time routes",
   runAudit: "Running BGP/RPKI audit",
+  analyseHijackRisk: "Analysing prefix hijack vectors",
 };
 
 const AUDIT_STEPS = [
@@ -469,6 +552,7 @@ function renderToolResult(toolName: string, rawResult: unknown): React.ReactNode
     case "getLeaks":    return <LeakCard   data={result as Parameters<typeof LeakCard>[0]["data"]}   />;
     case "getAnomalies":return <AnomalyCard data={result as Parameters<typeof AnomalyCard>[0]["data"]} />;
     case "runAudit":    return <AuditCard  data={result as Parameters<typeof AuditCard>[0]["data"]}  />;
+    case "analyseHijackRisk": return <HijackAnalysisCard data={result as HijackAnalysisData} />;
     default:
       if ((result as { report?: unknown })?.report) {
         return <AuditCard data={result as Parameters<typeof AuditCard>[0]["data"]} />;

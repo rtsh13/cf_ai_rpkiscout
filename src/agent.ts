@@ -17,6 +17,10 @@ interface Env {
   AI: Ai;
   RADAR_API_TOKEN: string;
   AUDIT_WORKFLOW: Workflow;
+  // Service binding to the Rust prefix-trie Worker.
+  // Type is `Fetcher` — the workers-types interface for service bindings.
+  // Exposes a .fetch(request) method that calls the Rust Worker in-PoP.
+  PREFIX_TRIE: Fetcher;
 }
 
 interface AgentState {
@@ -118,6 +122,39 @@ const TOOLS: Record<string, ToolDef> = {
       return { success: false, error: "Audit timed out — workflow is still running." };
     },
   },
+  analyseHijackRisk: {
+    description:
+      "Analyse a list of CIDR prefixes for BGP hijack vectors using a binary trie. " +
+      "Detects more-specific prefixes announced by different origin ASes — the most " +
+      "common form of BGP prefix hijack. Call this after getHijacks or runAudit when " +
+      "you have a list of prefixes to check.",
+    params: {
+      prefixes: {
+        type: "array",
+        description:
+          "Array of prefix objects with fields: prefix (CIDR string), " +
+          "origin (ASN number), rpki_validation (VALID | INVALID | UNKNOWN).",
+        required: true,
+      },
+    },
+    execute: async (args: Record<string, unknown>, env: Env) => {
+      // Call the Rust Worker via Service Binding.
+      // The URL host is arbitrary for service bindings — only the path matters.
+      const resp = await env.PREFIX_TRIE.fetch(
+        new Request("https://internal/specifics", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ prefixes: args.prefixes }),
+        })
+      );
+      if (!resp.ok) {
+        const text = await resp.text();
+        return { success: false, error: `Prefix trie Worker returned ${resp.status}: ${text}` };
+      }
+      const data = await resp.json();
+      return { success: true, data };
+    },
+  },
 };
 
 // ── Workers AI tool format ───────────────────────────────────────────────────
@@ -153,7 +190,8 @@ RULES:
 - All numbers must come from tool results — never fabricate.
 - When explaining tool results, be thorough: explain what each metric means, why it matters, and what the operator should do.
 
-Available tools: lookupASN, checkRPKI, getHijacks, getLeaks, getAnomalies, getRealTimeRoutes, runAudit.`;
+Available tools: lookupASN, checkRPKI, getHijacks, getLeaks, getAnomalies, getRealTimeRoutes, runAudit, analyseHijackRisk.
+Use analyseHijackRisk when you have prefix data and want to detect specific hijack vectors.`;
 
 // ── AI SDK data stream protocol ──────────────────────────────────────────────
 

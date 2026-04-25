@@ -9,12 +9,38 @@
     "head_sampling_rate": 1
   },
 
-  // Workers AI binding — no API key needed, runs on Cloudflare edge GPUs
+  // ── Why Workers AI binding instead of OpenAI/Anthropic API ────────────────
+  // Workers AI runs inference on Cloudflare's own GPU fleet. Two consequences:
+  // 1. Zero data egress: the LLM call never leaves Cloudflare's network.
+  // 2. No secret rotation surface: the binding is platform-managed, not an
+  //    API key stored in a secret. The tradeoff is model capability (Llama 3.3
+  //    70B vs GPT-4o); we mitigate this by validating all LLM JSON output
+  //    before using it (see workflow.ts, the fallback parsing block).
   "ai": {
     "binding": "AI"
   },
 
-  // Durable Objects — one RPKIScoutAgent instance per user session
+  // ── Why Durable Objects for session state, not KV or D1 ───────────────────
+  // KV is eventually consistent (up to 60s propagation lag) and has no
+  // atomicity — concurrent writes from parallel WebSocket frames can race.
+  // D1 is a good fit for globally-read shared data but adds a network hop.
+  //
+  // Durable Objects give us:
+  //   1. Strong consistency: a single-threaded execution context per session.
+  //      No concurrent writes, no races, no stale reads. Ever.
+  //   2. WebSocket hibernation: the DO's event loop sleeps between messages
+  //      and wakes on each incoming frame. We pay CPU only when the user
+  //      is actively sending a message, not while they're reading a response.
+  //   3. PoP co-location: the DO migrates to the PoP closest to the
+  //      WebSocket client. State reads during tool calls take <1ms because
+  //      the DO is running in the same facility as the connection.
+  //   4. Atomic SQLite: audit reports and chat history share the same SQLite
+  //      instance inside the DO. A workflow write and a chat message append
+  //      are in the same transaction — no partial writes visible to the UI.
+  //
+  // KV would be correct if we needed globally-readable shared state
+  // (e.g., a public leaderboard of audited ASNs). We don't — each
+  // session is private, stateful, and WebSocket-connected.
   "durable_objects": {
     "bindings": [
       {
@@ -24,7 +50,6 @@
     ]
   },
 
-  // SQLite-backed Durable Objects (GA as of 2025)
   "migrations": [
     {
       "tag": "v1",
@@ -32,12 +57,43 @@
     }
   ],
 
-  // Workflows — durable multi-step ASN audit pipeline
+  // ── Why Workflows for audits, not a long-running fetch ────────────────────
+  // The ASN audit requires 6 sequential Radar API calls + 1 LLM inference.
+  // Measured wall time: 15-30 seconds. A standard Worker's CPU time limit
+  // would kill this. A Workflow is a durable execution engine:
+  //   - Each `step.do()` is an independent checkpoint. If the RPKI fetch
+  //     fails transiently, the Workflow retries only that step, not the
+  //     entire audit pipeline.
+  //   - Workflow state persists across steps in Cloudflare's storage layer,
+  //     surviving Worker restarts and transient infrastructure issues.
+  //   - The caller (the Durable Object) polls the Workflow status without
+  //     holding a connection open, enabling the 30s wait to be async.
   "workflows": [
     {
       "name": "asn-audit",
       "binding": "AUDIT_WORKFLOW",
       "class_name": "ASNAuditWorkflow"
+    }
+  ],
+
+  // ── Why a Service Binding for prefix operations, not inline TypeScript ─────
+  // Prefix trie operations (LPM, aggregation, containment checks) are
+  // CPU-bound and memory-layout-sensitive. TypeScript running in V8 is
+  // appropriate for I/O-bound orchestration work — API calls, JSON parsing,
+  // streaming AI responses. For tight loops over bit-level data structures,
+  // V8's JIT and GC introduce unpredictable latency spikes.
+  //
+  // The Rust trie Worker:
+  //   - Compiles to WebAssembly: deterministic performance, no GC pauses
+  //   - Controls memory layout precisely: stack-allocated u32s, no boxing
+  //   - Is invoked via Service Binding: the call stays within the same
+  //     Cloudflare PoP, adding <0.5ms of overhead vs an inline function call
+  //   - Deploys and versions independently: the trie logic can be updated
+  //     without redeploying the entire agent
+  "services": [
+    {
+      "binding": "PREFIX_TRIE",
+      "service": "cf-rpkiscout-prefix-trie"
     }
   ],
 

@@ -1,0 +1,22 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+
+  // This Worker's deployed name. Must match the "service" field in the
+  // parent wrangler.jsonc's services binding exactly.
+  "name": "cf-rpkiscout-prefix-trie",
+
+  // worker-build outputs a JavaScript ES-module shim at this path.
+  "main": "build/worker/shim.mjs",
+
+  "compatibility_date": "2025-02-11",
+  "compatibility_flags": ["nodejs_compat"],
+
+  "build": {
+    "command": "cargo install -q worker-build && worker-build --release",
+    "watch_dir": "src"
+  },
+
+  "observability": {
+    "enabled": true
+  }
+}

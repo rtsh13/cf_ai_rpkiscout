@@ -18,3 +18,11 @@ wrangler.lock
 *.tsbuildinfo
 PRD.md
 DEPLOY_DASHBOARD.md
+IMPLEMENTATION_GUIDE.md
+
+# Screenshots
+*.png
+
+# Rust / Wasm build artifacts
+prefix-trie/target/
+prefix-trie/build/
