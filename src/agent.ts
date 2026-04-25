@@ -375,13 +375,13 @@ export class RPKIScoutAgent extends AIChatAgent<Env> {
               },
               {
                 role: "user" as const,
-                content: `Here are the tool results:\n\n${resultSummary}\n\nNow provide a detailed, insightful analysis of these results. Explain what each key finding means, why it matters for network security, and give specific actionable recommendations. Be thorough — this is for a network operator who needs to understand the implications.`,
+                content: `Here are the tool results:\n\n${resultSummary}\n\nWrite a concise interpretation in 3-5 sentences maximum. Cover: (1) the single most important finding, (2) why it matters, (3) the one action the operator should take first. Do not repeat every number — the UI cards show the full data. Stop after the 5th sentence.`,
               },
             ];
 
             const explainResponse = (await env.AI.run(MODEL, {
               messages: explainMessages,
-              max_tokens: 3000,
+              max_tokens: 512,
               stream: true,
             })) as ReadableStream;
 
