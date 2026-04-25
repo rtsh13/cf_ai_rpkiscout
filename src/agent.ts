@@ -138,13 +138,20 @@ const TOOLS: Record<string, ToolDef> = {
       },
     },
     execute: async (args: Record<string, unknown>, env: Env) => {
+      // The LLM sometimes serialises arrays as JSON strings — normalise before use.
+      let prefixes = args.prefixes;
+      if (typeof prefixes === "string") {
+        try { prefixes = JSON.parse(prefixes); } catch {
+          return { success: false, error: "prefixes must be an array of prefix objects" };
+        }
+      }
       // Call the Rust Worker via Service Binding.
       // The URL host is arbitrary for service bindings — only the path matters.
       const resp = await env.PREFIX_TRIE.fetch(
         new Request("https://internal/specifics", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ prefixes: args.prefixes }),
+          body: JSON.stringify({ prefixes }),
         })
       );
       if (!resp.ok) {
