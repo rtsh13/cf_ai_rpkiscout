@@ -548,7 +548,7 @@ export default function App() {
   // return a non-JSON 404 in local dev and reject the promise). The agent
   // syncs existing messages automatically via the cf_agent_chat_messages
   // WebSocket event once the DO connection is established.
-  const { messages, append, isLoading } = useAgentChat({
+  const { messages, append, isLoading, clearHistory } = useAgentChat({
     agent,
     getInitialMessages: null,
   });
@@ -580,6 +580,11 @@ export default function App() {
           <span className="logo-sub">BGP Security Intelligence · Powered by Cloudflare Radar</span>
         </div>
         <div className="topbar-right">
+          {messages.length > 0 && (
+            <button className="new-chat-btn" onClick={() => clearHistory()}>
+              + New Chat
+            </button>
+          )}
           <span className="status-dot" />
           <span className="status-label">LIVE</span>
         </div>

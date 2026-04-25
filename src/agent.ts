@@ -30,6 +30,8 @@ interface ToolDef {
   execute: (args: Record<string, unknown>, env: Env) => Promise<unknown>;
 }
 
+const MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast" as BaseAiTextGenerationModels;
+
 // ── Tool definitions ─────────────────────────────────────────────────────────
 
 const TOOLS: Record<string, ToolDef> = {
@@ -107,7 +109,6 @@ const TOOLS: Record<string, ToolDef> = {
       const asn = args.asn as number;
       const instanceId = `audit-${asn}-${Date.now()}`;
       const instance = await env.AUDIT_WORKFLOW.create({ id: instanceId, params: { asn } });
-
       for (let attempt = 0; attempt < 30; attempt++) {
         await new Promise<void>((r) => setTimeout(r, 2000));
         const status = await instance.status();
@@ -150,6 +151,7 @@ RULES:
 - Lead with a plain-language summary, then technical detail.
 - Use **bold** for critical findings. Bullet lists for recommendations.
 - All numbers must come from tool results — never fabricate.
+- When explaining tool results, be thorough: explain what each metric means, why it matters, and what the operator should do.
 
 Available tools: lookupASN, checkRPKI, getHijacks, getLeaks, getAnomalies, getRealTimeRoutes, runAudit.`;
 
@@ -167,30 +169,50 @@ const ds = {
     `d:${JSON.stringify({ finishReason: reason, usage: { promptTokens: 0, completionTokens: 0 } })}\n`,
 };
 
-// ── Try to parse a tool call from text (Workers AI outputs JSON as text) ─────
+// ── Parse tool calls from text (Workers AI sometimes outputs JSON as text) ──
 
 function extractToolCall(text: string): { name: string; arguments: Record<string, unknown> } | null {
   const trimmed = text.trim();
-  // Try the whole text as JSON
-  if (trimmed.startsWith("{")) {
-    try {
-      const parsed = JSON.parse(trimmed);
-      if (parsed.name && typeof parsed.name === "string" && TOOLS[parsed.name]) {
-        return { name: parsed.name, arguments: parsed.parameters ?? parsed.arguments ?? {} };
-      }
-    } catch { /* not valid JSON */ }
-  }
-  // Try to find JSON embedded in the text
-  const match = trimmed.match(/\{[\s\S]*"name"\s*:\s*"(\w+)"[\s\S]*\}/);
-  if (match) {
-    try {
-      const parsed = JSON.parse(match[0]);
-      if (parsed.name && TOOLS[parsed.name]) {
-        return { name: parsed.name, arguments: parsed.parameters ?? parsed.arguments ?? {} };
-      }
-    } catch { /* not valid JSON */ }
-  }
+  if (!trimmed.startsWith("{")) return null;
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (parsed.name && TOOLS[parsed.name]) {
+      return { name: parsed.name, arguments: parsed.parameters ?? parsed.arguments ?? {} };
+    }
+  } catch { /* not JSON */ }
   return null;
+}
+
+// ── Stream SSE from Workers AI ───────────────────────────────────────────────
+
+async function streamWorkersAIResponse(
+  response: ReadableStream,
+  send: (chunk: string) => void
+): Promise<string> {
+  const reader = response.pipeThrough(new TextDecoderStream()).getReader();
+  let buffer = "";
+  let fullText = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += value;
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+    for (const line of lines) {
+      if (!line.startsWith("data: ")) continue;
+      const data = line.slice(6).trim();
+      if (data === "[DONE]") continue;
+      try {
+        const chunk = JSON.parse(data);
+        if (chunk.response) {
+          fullText += chunk.response;
+          send(ds.text(chunk.response));
+        }
+      } catch { /* skip */ }
+    }
+  }
+  return fullText;
 }
 
 // ── Agent ─────────────────────────────────────────────────────────────────────
@@ -203,6 +225,7 @@ export class RPKIScoutAgent extends AIChatAgent<Env> {
     const encoder = new TextEncoder();
     const agent = this;
     const env = this.env;
+    let fullResponseText = "";
 
     const aiMessages = [
       { role: "system" as const, content: SYSTEM_PROMPT },
@@ -217,22 +240,33 @@ export class RPKIScoutAgent extends AIChatAgent<Env> {
         const send = (chunk: string) => controller.enqueue(encoder.encode(chunk));
 
         try {
-          // ── Call Workers AI (non-streaming) to get structured tool_calls ──
-          const response = (await env.AI.run(
-            "@cf/meta/llama-3.3-70b-instruct-fp8-fast" as BaseAiTextGenerationModels,
-            {
-              messages: aiMessages,
-              tools: workersAITools(),
-              max_tokens: 2048,
-            }
-          )) as { response?: string; tool_calls?: Array<{ name: string; arguments: Record<string, unknown> }> };
+          // ── Step 1: Call Workers AI (non-streaming) to get tool decisions ──
+          const response = (await env.AI.run(MODEL, {
+            messages: aiMessages,
+            tools: workersAITools(),
+            max_tokens: 2048,
+          })) as {
+            response?: string;
+            tool_calls?: Array<{ name: string; arguments: Record<string, unknown> }>;
+          };
 
           const text = response.response ?? "";
           const structuredToolCalls = response.tool_calls ?? [];
 
-          // ── Case 1: Structured tool calls from Workers AI ────────────────
-          if (structuredToolCalls.length > 0) {
-            for (const tc of structuredToolCalls) {
+          // Check if text output is actually a tool call in disguise
+          const textToolCall = !structuredToolCalls.length ? extractToolCall(text) : null;
+
+          const allToolCalls = structuredToolCalls.length > 0
+            ? structuredToolCalls
+            : textToolCall
+              ? [textToolCall]
+              : [];
+
+          if (allToolCalls.length > 0) {
+            // ── Step 2: Execute tool calls ─────────────────────────────────
+            const toolResults: Array<{ name: string; callId: string; result: unknown }> = [];
+
+            for (const tc of allToolCalls) {
               const toolDef = TOOLS[tc.name];
               if (!toolDef) continue;
 
@@ -241,67 +275,69 @@ export class RPKIScoutAgent extends AIChatAgent<Env> {
 
               try {
                 const result = await toolDef.execute(tc.arguments ?? {}, env);
+                toolResults.push({ name: tc.name, callId, result });
 
+                // Persist audit results to state
                 if (tc.name === "runAudit" && (result as { success?: boolean })?.success) {
                   const report = (result as { report?: AuditReport }).report;
                   if (report) {
                     const state = (agent.state ?? {}) as AgentState;
                     const watched = Array.isArray(state.watchedASNs) ? state.watchedASNs : [];
                     if (!watched.includes(report.asn)) {
-                      await agent.setState({ ...state, watchedASNs: [...watched, report.asn], [`audit_${report.asn}`]: report } as AgentState);
+                      await agent.setState({
+                        ...state,
+                        watchedASNs: [...watched, report.asn],
+                        [`audit_${report.asn}`]: report,
+                      } as AgentState);
                     }
                   }
                 }
 
                 send(ds.toolResult(callId, result));
               } catch (e) {
-                send(ds.toolResult(callId, { success: false, error: String(e) }));
+                const errResult = { success: false, error: String(e) };
+                toolResults.push({ name: tc.name, callId, result: errResult });
+                send(ds.toolResult(callId, errResult));
               }
             }
 
-            // Also emit any text the model generated alongside the tool call
-            if (text.trim()) {
-              const toolCallJson = extractToolCall(text);
-              if (!toolCallJson) {
-                send(ds.text(text));
-              }
-            }
-          }
-          // ── Case 2: Model output tool call as raw JSON text ───────────────
-          else if (text) {
-            const textToolCall = extractToolCall(text);
+            // ── Step 3: Stream a follow-up explanation of the tool results ──
+            const resultSummary = toolResults.map((tr) =>
+              JSON.stringify(tr.result).slice(0, 2000)
+            ).join("\n\n");
 
-            if (textToolCall) {
-              const toolDef = TOOLS[textToolCall.name];
-              if (toolDef) {
-                const callId = `call_${textToolCall.name}_${Date.now()}`;
-                send(ds.toolCall(callId, textToolCall.name, textToolCall.arguments));
+            const explainMessages = [
+              { role: "system" as const, content: SYSTEM_PROMPT },
+              ...aiMessages.slice(1), // skip system (already added)
+              {
+                role: "assistant" as const,
+                content: `I called the ${allToolCalls.map(t => t.name).join(", ")} tool(s) and got results.`,
+              },
+              {
+                role: "user" as const,
+                content: `Here are the tool results:\n\n${resultSummary}\n\nNow provide a detailed, insightful analysis of these results. Explain what each key finding means, why it matters for network security, and give specific actionable recommendations. Be thorough — this is for a network operator who needs to understand the implications.`,
+              },
+            ];
 
-                try {
-                  const result = await toolDef.execute(textToolCall.arguments, env);
+            const explainResponse = (await env.AI.run(MODEL, {
+              messages: explainMessages,
+              max_tokens: 1500,
+              stream: true,
+            })) as ReadableStream;
 
-                  if (textToolCall.name === "runAudit" && (result as { success?: boolean })?.success) {
-                    const report = (result as { report?: AuditReport }).report;
-                    if (report) {
-                      const state = (agent.state ?? {}) as AgentState;
-                      const watched = Array.isArray(state.watchedASNs) ? state.watchedASNs : [];
-                      if (!watched.includes(report.asn)) {
-                        await agent.setState({ ...state, watchedASNs: [...watched, report.asn], [`audit_${report.asn}`]: report } as AgentState);
-                      }
-                    }
-                  }
+            fullResponseText = await streamWorkersAIResponse(explainResponse, send);
 
-                  send(ds.toolResult(callId, result));
-                } catch (e) {
-                  send(ds.toolResult(callId, { success: false, error: String(e) }));
-                }
-              } else {
-                send(ds.text(text));
-              }
-            }
-            // ── Case 3: Plain text response (no tools) ───────────────────────
-            else {
-              send(ds.text(text));
+          } else {
+            // ── No tool calls — stream the text response directly ───────────
+            if (text) {
+              // If it's a plain text response, stream it from Workers AI
+              const streamResponse = (await env.AI.run(MODEL, {
+                messages: aiMessages,
+                max_tokens: 2048,
+                stream: true,
+              })) as ReadableStream;
+
+              fullResponseText = await streamWorkersAIResponse(streamResponse, send);
             }
           }
 
@@ -317,9 +353,9 @@ export class RPKIScoutAgent extends AIChatAgent<Env> {
       },
     });
 
-    // Call onFinish so the base class persists messages
+    // Persist the assistant's response so follow-up questions have context
     onFinish({
-      text: "",
+      text: fullResponseText,
       reasoning: undefined,
       reasoningDetails: [],
       files: [],
@@ -328,7 +364,15 @@ export class RPKIScoutAgent extends AIChatAgent<Env> {
       usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
       toolCalls: [],
       toolResults: [],
-      response: { id: "", timestamp: new Date(), modelId: "", headers: {}, messages: [] },
+      response: {
+        id: crypto.randomUUID(),
+        timestamp: new Date(),
+        modelId: MODEL,
+        headers: {},
+        messages: [
+          { role: "assistant" as const, content: [{ type: "text" as const, text: fullResponseText }] },
+        ],
+      },
       warnings: [],
       providerMetadata: undefined,
       experimental_providerMetadata: undefined,
