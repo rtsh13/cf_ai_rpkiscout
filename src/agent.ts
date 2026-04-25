@@ -30,7 +30,7 @@ interface ToolDef {
   execute: (args: Record<string, unknown>, env: Env) => Promise<unknown>;
 }
 
-// ── Tool definitions (decoupled from AI SDK — we call them manually) ─────────
+// ── Tool definitions ─────────────────────────────────────────────────────────
 
 const TOOLS: Record<string, ToolDef> = {
   lookupASN: {
@@ -111,21 +111,17 @@ const TOOLS: Record<string, ToolDef> = {
       for (let attempt = 0; attempt < 30; attempt++) {
         await new Promise<void>((r) => setTimeout(r, 2000));
         const status = await instance.status();
-        if (status.status === "complete") {
-          return { success: true, report: status.output as AuditReport };
-        }
-        if (status.status === "errored") {
-          return { success: false, error: "Audit workflow errored." };
-        }
+        if (status.status === "complete") return { success: true, report: status.output as AuditReport };
+        if (status.status === "errored") return { success: false, error: "Audit workflow errored." };
       }
       return { success: false, error: "Audit timed out — workflow is still running." };
     },
   },
 };
 
-// ── Workers AI tool format (for function calling) ────────────────────────────
+// ── Workers AI tool format ───────────────────────────────────────────────────
 
-function buildToolsForWorkersAI() {
+function workersAITools() {
   return Object.entries(TOOLS).map(([name, def]) => ({
     type: "function" as const,
     function: {
@@ -136,9 +132,7 @@ function buildToolsForWorkersAI() {
         properties: Object.fromEntries(
           Object.entries(def.params).map(([k, v]) => [k, { type: v.type, description: v.description }])
         ),
-        required: Object.entries(def.params)
-          .filter(([, v]) => v.required)
-          .map(([k]) => k),
+        required: Object.entries(def.params).filter(([, v]) => v.required).map(([k]) => k),
       },
     },
   }));
@@ -148,44 +142,55 @@ function buildToolsForWorkersAI() {
 
 const SYSTEM_PROMPT = `You are RPKIScout, a BGP routing security analyst on Cloudflare's edge.
 
-You have live access to Cloudflare Radar (330+ cities, 125+ countries, updated every 2 hours).
+You have live access to Cloudflare Radar (330+ cities, 125+ countries).
 
-IMPORTANT RULES:
-- For conceptual questions ("what is RPKI?", "explain BGP hijacks"), answer directly from knowledge — do NOT call any tools.
+RULES:
+- For conceptual questions ("what is RPKI?", "explain BGP"), answer directly — do NOT call tools.
 - Only call tools when the user asks for live data about a specific ASN, prefix, or event.
 - Lead with a plain-language summary, then technical detail.
-- Use **bold** for critical findings. Use bullet lists for recommendations.
+- Use **bold** for critical findings. Bullet lists for recommendations.
 - All numbers must come from tool results — never fabricate.
 
 Available tools: lookupASN, checkRPKI, getHijacks, getLeaks, getAnomalies, getRealTimeRoutes, runAudit.`;
 
-// ── AI SDK data stream format helpers ────────────────────────────────────────
-//
-// The data stream protocol used by useChat / useAgentChat:
-//   0:<json-string>\n         → text part
-//   9:<json-object>\n         → tool call start
-//   a:<json-object>\n         → tool result
-//   e:<json-object>\n         → step finish
-//   d:<json-object>\n         → message finish
+// ── AI SDK data stream protocol ──────────────────────────────────────────────
 
-function dsText(text: string): string {
-  return `0:${JSON.stringify(text)}\n`;
-}
+const ds = {
+  text: (t: string) => `0:${JSON.stringify(t)}\n`,
+  toolCall: (id: string, name: string, args: Record<string, unknown>) =>
+    `9:${JSON.stringify({ toolCallId: id, toolName: name, args })}\n`,
+  toolResult: (id: string, result: unknown) =>
+    `a:${JSON.stringify({ toolCallId: id, result })}\n`,
+  stepFinish: (reason: string) =>
+    `e:${JSON.stringify({ finishReason: reason, usage: { promptTokens: 0, completionTokens: 0 }, isContinued: false })}\n`,
+  messageFinish: (reason: string) =>
+    `d:${JSON.stringify({ finishReason: reason, usage: { promptTokens: 0, completionTokens: 0 } })}\n`,
+};
 
-function dsToolCall(id: string, name: string, args: Record<string, unknown>): string {
-  return `9:${JSON.stringify({ toolCallId: id, toolName: name, args })}\n`;
-}
+// ── Try to parse a tool call from text (Workers AI outputs JSON as text) ─────
 
-function dsToolResult(id: string, result: unknown): string {
-  return `a:${JSON.stringify({ toolCallId: id, result })}\n`;
-}
-
-function dsFinishStep(reason: string): string {
-  return `e:${JSON.stringify({ finishReason: reason, usage: { promptTokens: 0, completionTokens: 0 }, isContinued: false })}\n`;
-}
-
-function dsFinishMessage(reason: string): string {
-  return `d:${JSON.stringify({ finishReason: reason, usage: { promptTokens: 0, completionTokens: 0 } })}\n`;
+function extractToolCall(text: string): { name: string; arguments: Record<string, unknown> } | null {
+  const trimmed = text.trim();
+  // Try the whole text as JSON
+  if (trimmed.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (parsed.name && typeof parsed.name === "string" && TOOLS[parsed.name]) {
+        return { name: parsed.name, arguments: parsed.parameters ?? parsed.arguments ?? {} };
+      }
+    } catch { /* not valid JSON */ }
+  }
+  // Try to find JSON embedded in the text
+  const match = trimmed.match(/\{[\s\S]*"name"\s*:\s*"(\w+)"[\s\S]*\}/);
+  if (match) {
+    try {
+      const parsed = JSON.parse(match[0]);
+      if (parsed.name && TOOLS[parsed.name]) {
+        return { name: parsed.name, arguments: parsed.parameters ?? parsed.arguments ?? {} };
+      }
+    } catch { /* not valid JSON */ }
+  }
+  return null;
 }
 
 // ── Agent ─────────────────────────────────────────────────────────────────────
@@ -198,124 +203,121 @@ export class RPKIScoutAgent extends AIChatAgent<Env> {
     const encoder = new TextEncoder();
     const agent = this;
     const env = this.env;
-    const messages = this.messages;
+
+    const aiMessages = [
+      { role: "system" as const, content: SYSTEM_PROMPT },
+      ...this.messages.map((m) => ({
+        role: m.role as "user" | "assistant",
+        content: typeof m.content === "string" ? m.content : JSON.stringify(m.content),
+      })),
+    ];
 
     const stream = new ReadableStream({
       async start(controller) {
         const send = (chunk: string) => controller.enqueue(encoder.encode(chunk));
 
         try {
-          // ── Step 1: Call Workers AI with streaming + tools ─────────────
-          const aiMessages = [
-            { role: "system" as const, content: SYSTEM_PROMPT },
-            ...messages.map((m) => ({
-              role: m.role as "user" | "assistant",
-              content: typeof m.content === "string" ? m.content : JSON.stringify(m.content),
-            })),
-          ];
-
+          // ── Call Workers AI (non-streaming) to get structured tool_calls ──
           const response = (await env.AI.run(
             "@cf/meta/llama-3.3-70b-instruct-fp8-fast" as BaseAiTextGenerationModels,
             {
               messages: aiMessages,
-              tools: buildToolsForWorkersAI(),
-              stream: true,
+              tools: workersAITools(),
               max_tokens: 2048,
             }
-          )) as ReadableStream;
+          )) as { response?: string; tool_calls?: Array<{ name: string; arguments: Record<string, unknown> }> };
 
-          // ── Step 2: Consume the SSE stream from Workers AI ────────────
-          let fullText = "";
-          let toolCalls: Array<{ name: string; arguments: Record<string, unknown> }> = [];
+          const text = response.response ?? "";
+          const structuredToolCalls = response.tool_calls ?? [];
 
-          const reader = response.pipeThrough(new TextDecoderStream()).getReader();
-          let buffer = "";
-
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buffer += value;
-
-            const lines = buffer.split("\n");
-            buffer = lines.pop() ?? "";
-
-            for (const line of lines) {
-              if (!line.startsWith("data: ")) continue;
-              const data = line.slice(6).trim();
-              if (data === "[DONE]") continue;
-
-              try {
-                const chunk = JSON.parse(data);
-
-                // Text delta
-                if (chunk.response) {
-                  fullText += chunk.response;
-                  send(dsText(chunk.response));
-                }
-
-                // Tool calls (non-streaming — returned in final chunk)
-                if (chunk.tool_calls) {
-                  toolCalls = chunk.tool_calls;
-                }
-              } catch {
-                // skip malformed chunks
-              }
-            }
-          }
-
-          // ── Step 3: Execute tool calls (if any) ───────────────────────
-          if (toolCalls.length > 0) {
-            send(dsFinishStep("tool-calls"));
-
-            for (const tc of toolCalls) {
+          // ── Case 1: Structured tool calls from Workers AI ────────────────
+          if (structuredToolCalls.length > 0) {
+            for (const tc of structuredToolCalls) {
               const toolDef = TOOLS[tc.name];
               if (!toolDef) continue;
 
               const callId = `call_${tc.name}_${Date.now()}`;
-              send(dsToolCall(callId, tc.name, tc.arguments ?? {}));
+              send(ds.toolCall(callId, tc.name, tc.arguments ?? {}));
 
               try {
                 const result = await toolDef.execute(tc.arguments ?? {}, env);
 
-                // Persist audit results to agent state
                 if (tc.name === "runAudit" && (result as { success?: boolean })?.success) {
                   const report = (result as { report?: AuditReport }).report;
                   if (report) {
                     const state = (agent.state ?? {}) as AgentState;
                     const watched = Array.isArray(state.watchedASNs) ? state.watchedASNs : [];
-                    const asn = report.asn;
-                    if (!watched.includes(asn)) {
-                      await agent.setState({
-                        ...state,
-                        watchedASNs: [...watched, asn],
-                        [`audit_${asn}`]: report,
-                      } as AgentState);
+                    if (!watched.includes(report.asn)) {
+                      await agent.setState({ ...state, watchedASNs: [...watched, report.asn], [`audit_${report.asn}`]: report } as AgentState);
                     }
                   }
                 }
 
-                send(dsToolResult(callId, result));
+                send(ds.toolResult(callId, result));
               } catch (e) {
-                send(dsToolResult(callId, { success: false, error: String(e) }));
+                send(ds.toolResult(callId, { success: false, error: String(e) }));
+              }
+            }
+
+            // Also emit any text the model generated alongside the tool call
+            if (text.trim()) {
+              const toolCallJson = extractToolCall(text);
+              if (!toolCallJson) {
+                send(ds.text(text));
               }
             }
           }
+          // ── Case 2: Model output tool call as raw JSON text ───────────────
+          else if (text) {
+            const textToolCall = extractToolCall(text);
 
-          // ── Step 4: Finish ────────────────────────────────────────────
-          send(dsFinishStep(toolCalls.length > 0 ? "tool-calls" : "stop"));
-          send(dsFinishMessage(toolCalls.length > 0 ? "tool-calls" : "stop"));
+            if (textToolCall) {
+              const toolDef = TOOLS[textToolCall.name];
+              if (toolDef) {
+                const callId = `call_${textToolCall.name}_${Date.now()}`;
+                send(ds.toolCall(callId, textToolCall.name, textToolCall.arguments));
+
+                try {
+                  const result = await toolDef.execute(textToolCall.arguments, env);
+
+                  if (textToolCall.name === "runAudit" && (result as { success?: boolean })?.success) {
+                    const report = (result as { report?: AuditReport }).report;
+                    if (report) {
+                      const state = (agent.state ?? {}) as AgentState;
+                      const watched = Array.isArray(state.watchedASNs) ? state.watchedASNs : [];
+                      if (!watched.includes(report.asn)) {
+                        await agent.setState({ ...state, watchedASNs: [...watched, report.asn], [`audit_${report.asn}`]: report } as AgentState);
+                      }
+                    }
+                  }
+
+                  send(ds.toolResult(callId, result));
+                } catch (e) {
+                  send(ds.toolResult(callId, { success: false, error: String(e) }));
+                }
+              } else {
+                send(ds.text(text));
+              }
+            }
+            // ── Case 3: Plain text response (no tools) ───────────────────────
+            else {
+              send(ds.text(text));
+            }
+          }
+
+          send(ds.stepFinish("stop"));
+          send(ds.messageFinish("stop"));
         } catch (e) {
-          // Surface errors as text so the user sees something
-          send(dsText(`\n\n**Error:** ${String(e)}`));
-          send(dsFinishStep("error"));
-          send(dsFinishMessage("error"));
+          send(ds.text(`\n\n**Error:** ${String(e)}`));
+          send(ds.stepFinish("error"));
+          send(ds.messageFinish("error"));
         }
 
         controller.close();
       },
     });
 
-    // Call onFinish with a minimal valid shape so the base class persists messages
+    // Call onFinish so the base class persists messages
     onFinish({
       text: "",
       reasoning: undefined,
@@ -336,10 +338,7 @@ export class RPKIScoutAgent extends AIChatAgent<Env> {
     } as Parameters<typeof onFinish>[0]);
 
     return new Response(stream, {
-      headers: {
-        "Content-Type": "text/plain; charset=utf-8",
-        "X-Vercel-AI-Data-Stream": "v1",
-      },
+      headers: { "Content-Type": "text/plain; charset=utf-8", "X-Vercel-AI-Data-Stream": "v1" },
     });
   }
 }
