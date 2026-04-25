@@ -87,6 +87,17 @@ export interface RPKISummary {
   coveragePct: number;
 }
 
+// ── Date helper ──────────────────────────────────────────────────────────────
+
+function last7days(): { dateStart: string; dateEnd: string } {
+  const now = new Date();
+  const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+  return {
+    dateStart: weekAgo.toISOString(),
+    dateEnd: now.toISOString(),
+  };
+}
+
 // ── Shared fetch helper ───────────────────────────────────────────────────────
 
 async function radarFetch(
@@ -128,9 +139,11 @@ export async function getBGPHijackEvents(
   apiToken: string,
   options: { asn?: number; limit?: number } = {}
 ): Promise<HijackEventsResult> {
+  const dates = last7days();
   const params: Record<string, string> = {
     limit: String(options.limit ?? 10),
-    dateRange: "7d",
+    dateStart: dates.dateStart,
+    dateEnd: dates.dateEnd,
   };
   if (options.asn) params.involvedAsn = String(options.asn);
   return radarFetch("/bgp/hijacks/events", apiToken, params) as Promise<HijackEventsResult>;
@@ -142,9 +155,11 @@ export async function getBGPLeakEvents(
   apiToken: string,
   options: { asn?: number; limit?: number } = {}
 ): Promise<LeakEventsResult> {
+  const dates = last7days();
   const params: Record<string, string> = {
     limit: String(options.limit ?? 10),
-    dateRange: "7d",
+    dateStart: dates.dateStart,
+    dateEnd: dates.dateEnd,
   };
   if (options.asn) params.involvedAsn = String(options.asn);
   return radarFetch("/bgp/leaks/events", apiToken, params) as Promise<LeakEventsResult>;
@@ -177,8 +192,11 @@ export async function getTrafficAnomalies(
   apiToken: string,
   options: { asn?: number; limit?: number } = {}
 ): Promise<TrafficAnomaliesResult> {
+  const dates = last7days();
   const params: Record<string, string> = {
     limit: String(options.limit ?? 10),
+    dateStart: dates.dateStart,
+    dateEnd: dates.dateEnd,
   };
   if (options.asn) params.asn = String(options.asn);
   return radarFetch("/traffic_anomalies", apiToken, params) as Promise<TrafficAnomaliesResult>;
