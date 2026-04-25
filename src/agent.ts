@@ -296,6 +296,17 @@ export class RPKIScoutAgent extends AIChatAgent<Env> {
       })),
     ];
 
+    // Heuristic: only offer tools when the message clearly requests live data.
+    // Llama 3.3 70B ignores prompt-level rules and calls tools for conceptual
+    // questions — gate it in code instead.
+    const lastUserMessage = this.messages.filter(m => m.role === "user").pop();
+    const lastText = typeof lastUserMessage?.content === "string"
+      ? lastUserMessage.content
+      : JSON.stringify(lastUserMessage?.content ?? "");
+    const needsTools = /\bas\d+\b/i.test(lastText)           // ASN reference
+      || /\d+\.\d+\.\d+\.\d+\/\d+/.test(lastText)           // IP prefix
+      || /\b(audit|look\s*up|lookup|check|show|run|fetch|get|analyse|analyze|hijack vector|route leak|anomal|real.?time)\b/i.test(lastText);
+
     const stream = new ReadableStream({
       async start(controller) {
         const send = (chunk: string) => controller.enqueue(encoder.encode(chunk));
@@ -304,7 +315,7 @@ export class RPKIScoutAgent extends AIChatAgent<Env> {
           // ── Step 1: Call Workers AI (non-streaming) to get tool decisions ──
           const response = (await env.AI.run(MODEL, {
             messages: aiMessages,
-            tools: workersAITools(),
+            ...(needsTools ? { tools: workersAITools() } : {}),
             max_tokens: 2048,
           })) as {
             response?: string;
