@@ -24,17 +24,10 @@
     ]
   },
 
-  // Migrations — two-phase because wrangler dev --remote auto-created the class
-  // as non-SQLite before the first deploy. v1 acknowledges that, v2 deletes and
-  // recreates it as SQLite-backed so the agents SDK SQL API works.
+  // SQLite-backed Durable Objects (GA as of 2025)
   "migrations": [
     {
       "tag": "v1",
-      "new_classes": ["RPKIScoutAgent"]
-    },
-    {
-      "tag": "v2",
-      "deleted_classes": ["RPKIScoutAgent"],
       "new_sqlite_classes": ["RPKIScoutAgent"]
     }
   ],
