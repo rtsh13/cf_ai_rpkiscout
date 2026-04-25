@@ -113,7 +113,7 @@ const TOOLS: Record<string, ToolDef> = {
       const asn = args.asn as number;
       const instanceId = `audit-${asn}-${Date.now()}`;
       const instance = await env.AUDIT_WORKFLOW.create({ id: instanceId, params: { asn } });
-      for (let attempt = 0; attempt < 30; attempt++) {
+      for (let attempt = 0; attempt < 60; attempt++) {
         await new Promise<void>((r) => setTimeout(r, 2000));
         const status = await instance.status();
         if (status.status === "complete") return { success: true, report: status.output as AuditReport };
@@ -230,6 +230,21 @@ function extractToolCall(text: string): { name: string; arguments: Record<string
 
 // ── Stream SSE from Workers AI ───────────────────────────────────────────────
 
+function processSSELine(line: string, send: (chunk: string) => void): string {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith("data: ")) return "";
+  const data = trimmed.slice(6).trim();
+  if (!data || data === "[DONE]") return "";
+  try {
+    const chunk = JSON.parse(data);
+    if (chunk.response) {
+      send(ds.text(chunk.response));
+      return chunk.response as string;
+    }
+  } catch { /* skip malformed chunk */ }
+  return "";
+}
+
 async function streamWorkersAIResponse(
   response: ReadableStream,
   send: (chunk: string) => void
@@ -240,35 +255,18 @@ async function streamWorkersAIResponse(
 
   while (true) {
     const { done, value } = await reader.read();
-    if (done) break;
+    // On done, process whatever remains in buffer before breaking
+    if (done) {
+      for (const line of buffer.split("\n")) {
+        fullText += processSSELine(line, send);
+      }
+      break;
+    }
     buffer += value;
     const lines = buffer.split("\n");
-    buffer = lines.pop() ?? "";
+    buffer = lines.pop() ?? ""; // keep incomplete last line for next iteration
     for (const line of lines) {
-      if (!line.startsWith("data: ")) continue;
-      const data = line.slice(6).trim();
-      if (data === "[DONE]") continue;
-      try {
-        const chunk = JSON.parse(data);
-        if (chunk.response) {
-          fullText += chunk.response;
-          send(ds.text(chunk.response));
-        }
-      } catch { /* skip */ }
-    }
-  }
-
-  // Flush remaining buffer — last SSE line may not end with \n
-  if (buffer.trim().startsWith("data: ")) {
-    const data = buffer.trim().slice(6).trim();
-    if (data && data !== "[DONE]") {
-      try {
-        const chunk = JSON.parse(data);
-        if (chunk.response) {
-          fullText += chunk.response;
-          send(ds.text(chunk.response));
-        }
-      } catch { /* skip */ }
+      fullText += processSSELine(line, send);
     }
   }
 
