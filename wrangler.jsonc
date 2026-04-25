@@ -9,7 +9,7 @@
     "head_sampling_rate": 1
   },
 
-  // ── Why Workers AI binding instead of OpenAI/Anthropic API ────────────────
+  // Why Workers AI binding instead of OpenAI/Anthropic API
   // Workers AI runs inference on Cloudflare's own GPU fleet. Two consequences:
   // 1. Zero data egress: the LLM call never leaves Cloudflare's network.
   // 2. No secret rotation surface: the binding is platform-managed, not an
@@ -20,7 +20,7 @@
     "binding": "AI"
   },
 
-  // ── Why Durable Objects for session state, not KV or D1 ───────────────────
+  // Why Durable Objects for session state, not KV or D1
   // KV is eventually consistent (up to 60s propagation lag) and has no
   // atomicity — concurrent writes from parallel WebSocket frames can race.
   // D1 is a good fit for globally-read shared data but adds a network hop.
@@ -57,7 +57,7 @@
     }
   ],
 
-  // ── Why Workflows for audits, not a long-running fetch ────────────────────
+  // Why Workflows for audits, not a long-running fetch
   // The ASN audit requires 6 sequential Radar API calls + 1 LLM inference.
   // Measured wall time: 15-30 seconds. A standard Worker's CPU time limit
   // would kill this. A Workflow is a durable execution engine:
@@ -76,7 +76,7 @@
     }
   ],
 
-  // ── Why a Service Binding for prefix operations, not inline TypeScript ─────
+  // Why a Service Binding for prefix operations, not inline TypeScript 
   // Prefix trie operations (LPM, aggregation, containment checks) are
   // CPU-bound and memory-layout-sensitive. TypeScript running in V8 is
   // appropriate for I/O-bound orchestration work — API calls, JSON parsing,
