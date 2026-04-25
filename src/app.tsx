@@ -413,7 +413,7 @@ function HijackAnalysisCard({ data }: { data: HijackAnalysisData }) {
         <span className={`tool-card-tag ${result.total_flagged > 0 ? "tag-red" : "tag-green"}`}>
           {result.total_flagged === 0
             ? "NO VECTORS FOUND"
-            : `${result.total_flagged} of ${result.total_checked} FLAGGED`}
+            : `${result.total_flagged} VECTOR${result.total_flagged > 1 ? "S" : ""} FLAGGED`}
         </span>
       </div>
 

@@ -373,7 +373,7 @@ export class RPKIScoutAgent extends AIChatAgent<Env> {
               },
               {
                 role: "user" as const,
-                content: `Here are the tool results:\n\n${resultSummary}\n\nWrite a concise interpretation in 3-5 sentences maximum. Cover: (1) the single most important finding, (2) why it matters, (3) the one action the operator should take first. Do not repeat every number — the UI cards show the full data. Stop after the 5th sentence.`,
+                content: `Here are the tool results:\n\n${resultSummary}\n\nWrite exactly 2-3 complete sentences. State the key finding, why it matters, and what to do. End with a period. Do not use bullet points or headers.`,
               },
             ];
 
