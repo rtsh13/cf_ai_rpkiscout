@@ -366,14 +366,9 @@ export class RPKIScoutAgent extends AIChatAgent<Env> {
 
             const explainMessages = [
               { role: "system" as const, content: SYSTEM_PROMPT },
-              ...aiMessages.slice(1), // skip system (already added)
-              {
-                role: "assistant" as const,
-                content: `I called the ${allToolCalls.map(t => t.name).join(", ")} tool(s) and got results.`,
-              },
               {
                 role: "user" as const,
-                content: `Here are the tool results:\n\n${resultSummary}\n\nWrite exactly 2-3 complete sentences. State the key finding, why it matters, and what to do. End with a period. Do not use bullet points or headers.`,
+                content: `Tool results from ${allToolCalls.map(t => t.name).join(", ")}:\n\n${resultSummary}\n\nWrite exactly 2-3 complete sentences summarising the key finding, why it matters, and what the operator should do first. End with a period.`,
               },
             ];
 
