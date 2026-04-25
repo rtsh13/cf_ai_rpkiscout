@@ -1,8 +1,5 @@
 import { AIChatAgent } from "agents/ai-chat-agent";
-import { createWorkersAI } from "workers-ai-provider";
-import { streamText, tool } from "ai";
 import type { StreamTextOnFinishCallback, ToolSet } from "ai";
-import { z } from "zod";
 import {
   getASNInfo,
   getBGPHijackEvents,
@@ -13,6 +10,8 @@ import {
   summariseRPKI,
 } from "./radar";
 import type { AuditReport } from "./workflow";
+
+// ── Types ────────────────────────────────────────────────────────────────────
 
 interface Env {
   AI: Ai;
@@ -25,254 +24,322 @@ interface AgentState {
   [key: string]: unknown;
 }
 
-const SYSTEM_PROMPT = `You are RPKIScout, an AI-powered BGP routing security analyst running on Cloudflare's global edge network.
+interface ToolDef {
+  description: string;
+  params: Record<string, { type: string; description: string; required?: boolean }>;
+  execute: (args: Record<string, unknown>, env: Env) => Promise<unknown>;
+}
 
-You have real-time access to Cloudflare Radar — one of the world's largest Internet observability platforms, processing BGP data from 330+ route collectors across 125+ countries, updated every 2 hours.
+// ── Tool definitions (decoupled from AI SDK — we call them manually) ─────────
 
-## When to call tools vs answer directly
+const TOOLS: Record<string, ToolDef> = {
+  lookupASN: {
+    description: "Look up ASN metadata (name, country, org).",
+    params: { asn: { type: "number", description: "ASN number e.g. 13335", required: true } },
+    execute: async (args, env) => {
+      const data = await getASNInfo(args.asn as number, env.RADAR_API_TOKEN);
+      return { success: true, data };
+    },
+  },
+  checkRPKI: {
+    description: "Check RPKI validation for an IP prefix.",
+    params: { prefix: { type: "string", description: "CIDR prefix e.g. 1.1.1.0/24", required: true } },
+    execute: async (args, env) => {
+      const data = await getPrefixRPKI(args.prefix as string, env.RADAR_API_TOKEN);
+      const summary = summariseRPKI(data);
+      return { success: true, data, summary };
+    },
+  },
+  getHijacks: {
+    description: "Get recent BGP hijack events (last 7 days).",
+    params: {
+      asn: { type: "number", description: "Filter by ASN" },
+      limit: { type: "number", description: "Max results (default 10)" },
+    },
+    execute: async (args, env) => {
+      const data = await getBGPHijackEvents(env.RADAR_API_TOKEN, {
+        asn: args.asn as number | undefined,
+        limit: (args.limit as number) ?? 10,
+      });
+      return { success: true, data };
+    },
+  },
+  getLeaks: {
+    description: "Get recent BGP route leak events (last 7 days).",
+    params: {
+      asn: { type: "number", description: "Filter by ASN" },
+      limit: { type: "number", description: "Max results (default 10)" },
+    },
+    execute: async (args, env) => {
+      const data = await getBGPLeakEvents(env.RADAR_API_TOKEN, {
+        asn: args.asn as number | undefined,
+        limit: (args.limit as number) ?? 10,
+      });
+      return { success: true, data };
+    },
+  },
+  getAnomalies: {
+    description: "Get traffic anomalies detected by Cloudflare Radar.",
+    params: {
+      asn: { type: "number", description: "Filter by ASN" },
+      limit: { type: "number", description: "Max results (default 10)" },
+    },
+    execute: async (args, env) => {
+      const data = await getTrafficAnomalies(env.RADAR_API_TOKEN, {
+        asn: args.asn as number | undefined,
+        limit: (args.limit as number) ?? 10,
+      });
+      return { success: true, data };
+    },
+  },
+  getRealTimeRoutes: {
+    description: "Get real-time BGP routes for a prefix.",
+    params: { prefix: { type: "string", description: "CIDR prefix", required: true } },
+    execute: async (args, env) => {
+      const data = await getRealTimeRoutes(args.prefix as string, env.RADAR_API_TOKEN);
+      return { success: true, data };
+    },
+  },
+  runAudit: {
+    description: "Run a comprehensive BGP/RPKI security audit for an ASN (15-30s).",
+    params: { asn: { type: "number", description: "ASN to audit", required: true } },
+    execute: async (args, env) => {
+      const asn = args.asn as number;
+      const instanceId = `audit-${asn}-${Date.now()}`;
+      const instance = await env.AUDIT_WORKFLOW.create({ id: instanceId, params: { asn } });
 
-**Answer directly (no tools)** for conceptual or educational questions:
-- "What is RPKI?" → explain from knowledge, no tool call needed
-- "What is a BGP hijack?" → explain from knowledge
-- "How does route origin validation work?" → explain from knowledge
+      for (let attempt = 0; attempt < 30; attempt++) {
+        await new Promise<void>((r) => setTimeout(r, 2000));
+        const status = await instance.status();
+        if (status.status === "complete") {
+          return { success: true, report: status.output as AuditReport };
+        }
+        if (status.status === "errored") {
+          return { success: false, error: "Audit workflow errored." };
+        }
+      }
+      return { success: false, error: "Audit timed out — workflow is still running." };
+    },
+  },
+};
 
-**Call tools only when the user asks for live data** about a specific network entity:
-- ASN number mentioned → lookupASN
-- IP prefix in CIDR notation mentioned → checkRPKI
-- "Recent hijacks/leaks?" → getHijacks / getLeaks
-- "Is X down / any anomalies?" → getAnomalies
-- "Audit AS X" / "Security check for AS X" → runAudit (takes 15-30s)
-- "What routes does prefix X have?" → getRealTimeRoutes
+// ── Workers AI tool format (for function calling) ────────────────────────────
 
-**Never call tools speculatively** to illustrate a concept. If the user asks "what is RPKI?", explain it — do not call checkRPKI on a random prefix to demonstrate.
+function buildToolsForWorkersAI() {
+  return Object.entries(TOOLS).map(([name, def]) => ({
+    type: "function" as const,
+    function: {
+      name,
+      description: def.description,
+      parameters: {
+        type: "object",
+        properties: Object.fromEntries(
+          Object.entries(def.params).map(([k, v]) => [k, { type: v.type, description: v.description }])
+        ),
+        required: Object.entries(def.params)
+          .filter(([, v]) => v.required)
+          .map(([k]) => k),
+      },
+    },
+  }));
+}
 
-## Response style
+// ── System prompt ────────────────────────────────────────────────────────────
 
-- Lead every response with one plain-language sentence a CISO can understand
-- Follow with technical depth for operators
-- Use **bold** for critical findings (RPKI_INVALID, active hijacks, CRITICAL risk)
-- Use bullet lists for recommendations; number them if prioritized
-- All numbers must come from tool results — never fabricate statistics
-- When you call multiple tools, synthesize the findings instead of listing them separately
+const SYSTEM_PROMPT = `You are RPKIScout, a BGP routing security analyst on Cloudflare's edge.
 
-## Risk thresholds
+You have live access to Cloudflare Radar (330+ cities, 125+ countries, updated every 2 hours).
 
-| Signal | Risk level |
-|--------|-----------|
-| RPKI coverage < 50% + any incident | CRITICAL |
-| Any RPKI_INVALID prefix | HIGH |
-| RPKI coverage < 50% | HIGH |
-| Hijack or leak events (7d) | MEDIUM |
-| Coverage 50-79%, no incidents | MEDIUM |
-| Coverage ≥ 80%, no incidents | LOW |
+IMPORTANT RULES:
+- For conceptual questions ("what is RPKI?", "explain BGP hijacks"), answer directly from knowledge — do NOT call any tools.
+- Only call tools when the user asks for live data about a specific ASN, prefix, or event.
+- Lead with a plain-language summary, then technical detail.
+- Use **bold** for critical findings. Use bullet lists for recommendations.
+- All numbers must come from tool results — never fabricate.
 
-## Watched ASNs
+Available tools: lookupASN, checkRPKI, getHijacks, getLeaks, getAnomalies, getRealTimeRoutes, runAudit.`;
 
-When you complete an audit, the ASN is automatically added to the session's watched list. If the user asks "what have I looked at?" or similar, retrieve the state to list them.`;
+// ── AI SDK data stream format helpers ────────────────────────────────────────
+//
+// The data stream protocol used by useChat / useAgentChat:
+//   0:<json-string>\n         → text part
+//   9:<json-object>\n         → tool call start
+//   a:<json-object>\n         → tool result
+//   e:<json-object>\n         → step finish
+//   d:<json-object>\n         → message finish
+
+function dsText(text: string): string {
+  return `0:${JSON.stringify(text)}\n`;
+}
+
+function dsToolCall(id: string, name: string, args: Record<string, unknown>): string {
+  return `9:${JSON.stringify({ toolCallId: id, toolName: name, args })}\n`;
+}
+
+function dsToolResult(id: string, result: unknown): string {
+  return `a:${JSON.stringify({ toolCallId: id, result })}\n`;
+}
+
+function dsFinishStep(reason: string): string {
+  return `e:${JSON.stringify({ finishReason: reason, usage: { promptTokens: 0, completionTokens: 0 }, isContinued: false })}\n`;
+}
+
+function dsFinishMessage(reason: string): string {
+  return `d:${JSON.stringify({ finishReason: reason, usage: { promptTokens: 0, completionTokens: 0 } })}\n`;
+}
+
+// ── Agent ─────────────────────────────────────────────────────────────────────
 
 export class RPKIScoutAgent extends AIChatAgent<Env> {
   async onChatMessage(
     onFinish: StreamTextOnFinishCallback<ToolSet>,
     options?: { abortSignal?: AbortSignal }
   ) {
-    const workersai = createWorkersAI({ binding: this.env.AI });
+    const encoder = new TextEncoder();
+    const agent = this;
+    const env = this.env;
+    const messages = this.messages;
 
-    const result = streamText({
-      model: workersai("@cf/meta/llama-3.3-70b-instruct-fp8-fast"),
-      system: SYSTEM_PROMPT,
-      messages: this.messages,
-      // workers-ai-provider@0.2.0 can hang on multi-step continuations after
-      // a tool result. maxSteps:1 means one LLM call: it can generate text AND
-      // call tools in that call, but no second LLM call after tool results.
-      // The structured cards (audit, RPKI, hijacks…) are the full response.
-      maxSteps: 1,
-      abortSignal: options?.abortSignal,
-      tools: {
-        // ── Look up ASN metadata ────────────────────────────────────────────
-        lookupASN: tool({
-          description:
-            "Look up metadata for an Autonomous System Number: name, country, organisation, and peer relationships. Use when the user mentions an ASN number or network operator name.",
-          parameters: z.object({
-            asn: z.number().int().positive().describe("The ASN number, e.g. 13335 for Cloudflare"),
-          }),
-          execute: async ({ asn }) => {
-            try {
-              const data = await getASNInfo(asn, this.env.RADAR_API_TOKEN);
-              return { success: true, data };
-            } catch (e) {
-              return { success: false, error: String(e) };
+    const stream = new ReadableStream({
+      async start(controller) {
+        const send = (chunk: string) => controller.enqueue(encoder.encode(chunk));
+
+        try {
+          // ── Step 1: Call Workers AI with streaming + tools ─────────────
+          const aiMessages = [
+            { role: "system" as const, content: SYSTEM_PROMPT },
+            ...messages.map((m) => ({
+              role: m.role as "user" | "assistant",
+              content: typeof m.content === "string" ? m.content : JSON.stringify(m.content),
+            })),
+          ];
+
+          const response = (await env.AI.run(
+            "@cf/meta/llama-3.3-70b-instruct-fp8-fast" as BaseAiTextGenerationModels,
+            {
+              messages: aiMessages,
+              tools: buildToolsForWorkersAI(),
+              stream: true,
+              max_tokens: 2048,
             }
-          },
-        }),
+          )) as ReadableStream;
 
-        // ── Check RPKI validation for a prefix ─────────────────────────────
-        checkRPKI: tool({
-          description:
-            "Check the RPKI validation status (VALID / INVALID / UNKNOWN) of an IP prefix and its origin ASN mapping.",
-          parameters: z.object({
-            prefix: z
-              .string()
-              .describe("IP prefix in CIDR notation, e.g. 1.1.1.0/24"),
-          }),
-          execute: async ({ prefix }) => {
-            try {
-              const data = await getPrefixRPKI(prefix, this.env.RADAR_API_TOKEN);
-              const summary = summariseRPKI(data);
-              return { success: true, data, summary };
-            } catch (e) {
-              return { success: false, error: String(e) };
-            }
-          },
-        }),
+          // ── Step 2: Consume the SSE stream from Workers AI ────────────
+          let fullText = "";
+          let toolCalls: Array<{ name: string; arguments: Record<string, unknown> }> = [];
 
-        // ── BGP hijack events ───────────────────────────────────────────────
-        getHijacks: tool({
-          description:
-            "Retrieve recent BGP hijack events from Cloudflare Radar (last 7 days). Optionally filter by a specific ASN to see events involving that network.",
-          parameters: z.object({
-            asn: z
-              .number()
-              .int()
-              .positive()
-              .optional()
-              .describe("Filter hijacks involving this ASN"),
-            limit: z.number().int().min(1).max(25).default(10),
-          }),
-          execute: async ({ asn, limit }) => {
-            try {
-              const data = await getBGPHijackEvents(this.env.RADAR_API_TOKEN, { asn, limit });
-              return { success: true, data };
-            } catch (e) {
-              return { success: false, error: String(e) };
-            }
-          },
-        }),
+          const reader = response.pipeThrough(new TextDecoderStream()).getReader();
+          let buffer = "";
 
-        // ── BGP route leak events ───────────────────────────────────────────
-        getLeaks: tool({
-          description:
-            "Retrieve recent BGP route leak events from Cloudflare Radar (last 7 days). Optionally filter by a specific ASN.",
-          parameters: z.object({
-            asn: z
-              .number()
-              .int()
-              .positive()
-              .optional()
-              .describe("Filter leaks involving this ASN"),
-            limit: z.number().int().min(1).max(25).default(10),
-          }),
-          execute: async ({ asn, limit }) => {
-            try {
-              const data = await getBGPLeakEvents(this.env.RADAR_API_TOKEN, { asn, limit });
-              return { success: true, data };
-            } catch (e) {
-              return { success: false, error: String(e) };
-            }
-          },
-        }),
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += value;
 
-        // ── Traffic anomalies ───────────────────────────────────────────────
-        getAnomalies: tool({
-          description:
-            "Retrieve internet traffic anomalies and outage signals detected by Cloudflare Radar. Optionally filter by ASN.",
-          parameters: z.object({
-            asn: z
-              .number()
-              .int()
-              .positive()
-              .optional()
-              .describe("Filter anomalies for this ASN"),
-            limit: z.number().int().min(1).max(20).default(10),
-          }),
-          execute: async ({ asn, limit }) => {
-            try {
-              const data = await getTrafficAnomalies(this.env.RADAR_API_TOKEN, { asn, limit });
-              return { success: true, data };
-            } catch (e) {
-              return { success: false, error: String(e) };
-            }
-          },
-        }),
+            const lines = buffer.split("\n");
+            buffer = lines.pop() ?? "";
 
-        // ── Real-time BGP routes for a prefix ──────────────────────────────
-        getRealTimeRoutes: tool({
-          description:
-            "Get real-time BGP routes for a specific IP prefix from public route collectors (RouteViews and RIPE RIS). Use for AS path analysis.",
-          parameters: z.object({
-            prefix: z.string().describe("IP prefix in CIDR notation, e.g. 8.8.8.0/24"),
-          }),
-          execute: async ({ prefix }) => {
-            try {
-              const data = await getRealTimeRoutes(prefix, this.env.RADAR_API_TOKEN);
-              return { success: true, data };
-            } catch (e) {
-              return { success: false, error: String(e) };
-            }
-          },
-        }),
+            for (const line of lines) {
+              if (!line.startsWith("data: ")) continue;
+              const data = line.slice(6).trim();
+              if (data === "[DONE]") continue;
 
-        // ── Full durable audit via Workflow ─────────────────────────────────
-        runAudit: tool({
-          description:
-            "Run a comprehensive multi-step BGP/RPKI security audit for an ASN using a durable Cloudflare Workflow. Fetches ASN info, hijacks, leaks, RPKI coverage, and anomalies, then generates an AI risk report. Takes 15-30 seconds. Use for any 'audit', 'security check', or 'how secure is' request.",
-          parameters: z.object({
-            asn: z.number().int().positive().describe("The ASN number to audit"),
-          }),
-          execute: async ({ asn }) => {
-            try {
-              const instanceId = `audit-${asn}-${Date.now()}`;
-              const instance = await this.env.AUDIT_WORKFLOW.create({
-                id: instanceId,
-                params: { asn },
-              });
+              try {
+                const chunk = JSON.parse(data);
 
-              // Poll for completion — Workflows are durable, survive disconnects
-              for (let attempt = 0; attempt < 30; attempt++) {
-                await new Promise<void>((r) => setTimeout(r, 2000));
-                const status = await instance.status();
-
-                if (status.status === "complete") {
-                  const report = status.output as AuditReport;
-
-                  // Persist to agent state so future turns can reference audited ASNs
-                  const state = (this.state ?? {}) as AgentState;
-                  const watched = Array.isArray(state.watchedASNs) ? state.watchedASNs : [];
-                  if (!watched.includes(asn)) {
-                    await this.setState({
-                      ...state,
-                      watchedASNs: [...watched, asn],
-                      [`audit_${asn}`]: report,
-                    } as AgentState);
-                  }
-
-                  return { success: true, report };
+                // Text delta
+                if (chunk.response) {
+                  fullText += chunk.response;
+                  send(dsText(chunk.response));
                 }
 
-                if (status.status === "errored") {
-                  return {
-                    success: false,
-                    error: "Audit workflow encountered an error.",
-                    details: String(status),
-                  };
+                // Tool calls (non-streaming — returned in final chunk)
+                if (chunk.tool_calls) {
+                  toolCalls = chunk.tool_calls;
                 }
+              } catch {
+                // skip malformed chunks
               }
-
-              return {
-                success: false,
-                error:
-                  "Audit is taking longer than expected. The workflow is still running — check back shortly.",
-              };
-            } catch (e) {
-              return { success: false, error: String(e) };
             }
-          },
-        }),
+          }
+
+          // ── Step 3: Execute tool calls (if any) ───────────────────────
+          if (toolCalls.length > 0) {
+            send(dsFinishStep("tool-calls"));
+
+            for (const tc of toolCalls) {
+              const toolDef = TOOLS[tc.name];
+              if (!toolDef) continue;
+
+              const callId = `call_${tc.name}_${Date.now()}`;
+              send(dsToolCall(callId, tc.name, tc.arguments ?? {}));
+
+              try {
+                const result = await toolDef.execute(tc.arguments ?? {}, env);
+
+                // Persist audit results to agent state
+                if (tc.name === "runAudit" && (result as { success?: boolean })?.success) {
+                  const report = (result as { report?: AuditReport }).report;
+                  if (report) {
+                    const state = (agent.state ?? {}) as AgentState;
+                    const watched = Array.isArray(state.watchedASNs) ? state.watchedASNs : [];
+                    const asn = report.asn;
+                    if (!watched.includes(asn)) {
+                      await agent.setState({
+                        ...state,
+                        watchedASNs: [...watched, asn],
+                        [`audit_${asn}`]: report,
+                      } as AgentState);
+                    }
+                  }
+                }
+
+                send(dsToolResult(callId, result));
+              } catch (e) {
+                send(dsToolResult(callId, { success: false, error: String(e) }));
+              }
+            }
+          }
+
+          // ── Step 4: Finish ────────────────────────────────────────────
+          send(dsFinishStep(toolCalls.length > 0 ? "tool-calls" : "stop"));
+          send(dsFinishMessage(toolCalls.length > 0 ? "tool-calls" : "stop"));
+        } catch (e) {
+          // Surface errors as text so the user sees something
+          send(dsText(`\n\n**Error:** ${String(e)}`));
+          send(dsFinishStep("error"));
+          send(dsFinishMessage("error"));
+        }
+
+        controller.close();
       },
-      // Pass the callback directly — it's StreamTextOnFinishCallback and the
-      // base class uses response.messages to persist the conversation to SQLite.
-      onFinish,
     });
 
-    return result.toDataStreamResponse();
+    // Call onFinish with a minimal valid shape so the base class persists messages
+    onFinish({
+      text: "",
+      reasoning: undefined,
+      reasoningDetails: [],
+      files: [],
+      sources: [],
+      finishReason: "stop",
+      usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+      toolCalls: [],
+      toolResults: [],
+      response: { id: "", timestamp: new Date(), modelId: "", headers: {}, messages: [] },
+      warnings: [],
+      providerMetadata: undefined,
+      experimental_providerMetadata: undefined,
+      steps: [],
+      request: {},
+      rawResponse: undefined,
+    } as Parameters<typeof onFinish>[0]);
+
+    return new Response(stream, {
+      headers: {
+        "Content-Type": "text/plain; charset=utf-8",
+        "X-Vercel-AI-Data-Stream": "v1",
+      },
+    });
   }
 }
