@@ -189,16 +189,19 @@ const SYSTEM_PROMPT = `You are RPKIScout, a BGP routing security analyst on Clou
 
 You have live access to Cloudflare Radar (330+ cities, 125+ countries).
 
-RULES:
-- For conceptual questions ("what is RPKI?", "explain BGP"), answer directly — do NOT call tools.
-- Only call tools when the user asks for live data about a specific ASN, prefix, or event.
-- Lead with a plain-language summary, then technical detail.
-- Use **bold** for critical findings. Bullet lists for recommendations.
-- All numbers must come from tool results — never fabricate.
-- When explaining tool results, be thorough: explain what each metric means, why it matters, and what the operator should do.
+TOOL USAGE RULES — follow exactly:
+- Questions starting with "what", "why", "how", "explain" are conceptual — answer directly from knowledge, NEVER call a tool.
+- Only call a tool when the user explicitly asks for live data: "look up AS...", "audit AS...", "check prefix...", "show hijack events", "show leaks", "show anomalies", "check for hijack vectors".
+- NEVER call analyseHijackRisk unless the user explicitly provides a list of prefixes with origin ASNs and asks to check them.
+- NEVER call getHijacks for a conceptual question about hijacking.
+- If in doubt, answer from knowledge. Do not call tools speculatively.
 
-Available tools: lookupASN, checkRPKI, getHijacks, getLeaks, getAnomalies, getRealTimeRoutes, runAudit, analyseHijackRisk.
-Use analyseHijackRisk when you have prefix data and want to detect specific hijack vectors.`;
+RESPONSE RULES:
+- Lead with a plain-language summary, then technical detail.
+- Use **bold** for critical findings.
+- All numbers must come from tool results — never fabricate.
+
+Available tools: lookupASN, checkRPKI, getHijacks, getLeaks, getAnomalies, getRealTimeRoutes, runAudit, analyseHijackRisk.`;
 
 // ── AI SDK data stream protocol ──────────────────────────────────────────────
 
@@ -381,17 +384,13 @@ export class RPKIScoutAgent extends AIChatAgent<Env> {
             if (fullResponseText) send(ds.text(fullResponseText));
 
           } else {
-            // ── No tool calls — stream the text response directly ───────────
-            if (text) {
-              // If it's a plain text response, stream it from Workers AI
-              const streamResponse = (await env.AI.run(MODEL, {
-                messages: aiMessages,
-                max_tokens: 2048,
-                stream: true,
-              })) as ReadableStream;
-
-              fullResponseText = await streamWorkersAIResponse(streamResponse, send);
-            }
+            // ── No tool calls — call Workers AI non-streaming ───────────────
+            const directResponse = await env.AI.run(MODEL, {
+              messages: aiMessages,
+              max_tokens: 1024,
+            }) as { response?: string };
+            fullResponseText = directResponse.response ?? "";
+            if (fullResponseText) send(ds.text(fullResponseText));
           }
 
           send(ds.stepFinish("stop"));
