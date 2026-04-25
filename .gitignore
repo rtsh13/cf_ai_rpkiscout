@@ -1,0 +1,20 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Wrangler
+.wrangler/
+wrangler.lock
+
+# Local secrets — never commit
+.dev.vars
+
+# macOS
+.DS_Store
+
+# TypeScript
+*.tsbuildinfo
+PRD.md
+DEPLOY_DASHBOARD.md

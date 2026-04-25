@@ -1,0 +1,56 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "cf-ai-rpkiscout",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-02-11",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+
+  // Workers AI binding — no API key needed, runs on Cloudflare edge GPUs
+  "ai": {
+    "binding": "AI"
+  },
+
+  // Durable Objects — one RPKIScoutAgent instance per user session
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "RPKI_SCOUT",
+        "class_name": "RPKIScoutAgent"
+      }
+    ]
+  },
+
+  // Migrations — two-phase because wrangler dev --remote auto-created the class
+  // as non-SQLite before the first deploy. v1 acknowledges that, v2 deletes and
+  // recreates it as SQLite-backed so the agents SDK SQL API works.
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_classes": ["RPKIScoutAgent"]
+    },
+    {
+      "tag": "v2",
+      "deleted_classes": ["RPKIScoutAgent"],
+      "new_sqlite_classes": ["RPKIScoutAgent"]
+    }
+  ],
+
+  // Workflows — durable multi-step ASN audit pipeline
+  "workflows": [
+    {
+      "name": "asn-audit",
+      "binding": "AUDIT_WORKFLOW",
+      "class_name": "ASNAuditWorkflow"
+    }
+  ],
+
+  // Static assets — Vite build output served by Workers
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS"
+  }
+}
