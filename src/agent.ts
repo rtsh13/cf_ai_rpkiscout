@@ -81,7 +81,11 @@ export class RPKIScoutAgent extends AIChatAgent<Env> {
       model: workersai("@cf/meta/llama-3.3-70b-instruct-fp8-fast"),
       system: SYSTEM_PROMPT,
       messages: this.messages,
-      maxSteps: 5,
+      // workers-ai-provider@0.2.0 can hang on multi-step continuations after
+      // a tool result. maxSteps:1 means one LLM call: it can generate text AND
+      // call tools in that call, but no second LLM call after tool results.
+      // The structured cards (audit, RPKI, hijacks…) are the full response.
+      maxSteps: 1,
       abortSignal: options?.abortSignal,
       tools: {
         // ── Look up ASN metadata ────────────────────────────────────────────
