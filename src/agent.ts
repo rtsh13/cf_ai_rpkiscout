@@ -34,7 +34,7 @@ interface ToolDef {
   execute: (args: Record<string, unknown>, env: Env) => Promise<unknown>;
 }
 
-const MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast" as BaseAiTextGenerationModels;
+const MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 
 // ── Tool definitions ─────────────────────────────────────────────────────────
 
@@ -363,7 +363,7 @@ export class RPKIScoutAgent extends AIChatAgent<Env> {
 
             // ── Step 3: Stream a follow-up explanation of the tool results ──
             const resultSummary = toolResults.map((tr) =>
-              JSON.stringify(tr.result).slice(0, 2000)
+              JSON.stringify(tr.result).slice(0, 6000)
             ).join("\n\n");
 
             const explainMessages = [
@@ -381,7 +381,7 @@ export class RPKIScoutAgent extends AIChatAgent<Env> {
 
             const explainResponse = (await env.AI.run(MODEL, {
               messages: explainMessages,
-              max_tokens: 1500,
+              max_tokens: 3000,
               stream: true,
             })) as ReadableStream;
 
@@ -439,7 +439,7 @@ export class RPKIScoutAgent extends AIChatAgent<Env> {
       steps: [],
       request: {},
       rawResponse: undefined,
-    } as Parameters<typeof onFinish>[0]);
+    } as unknown as Parameters<typeof onFinish>[0]);
 
     return new Response(stream, {
       headers: { "Content-Type": "text/plain; charset=utf-8", "X-Vercel-AI-Data-Stream": "v1" },
