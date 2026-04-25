@@ -19,6 +19,19 @@ RPKIScout is a conversational AI agent that analyses BGP routing security in rea
 
 ---
 
+## Production
+
+### All bindings — AI, Durable Object, Workflow, Service Binding, Assets
+![RPKIScout bindings](./rpkiscount_bindings.png)
+
+### ASN audit Workflow — 24 completed runs, 6-step DAG
+![Workflow instances](./asn_workflow.png)
+
+### Rust prefix-trie Worker — 0 errors, sub-8ms CPU, edge PoP placement
+![Prefix trie Worker](./prefixtrie_bindings.png)
+
+---
+
 ## Architecture
 
 No origin server. Every component runs on Cloudflare's edge.

@@ -20,8 +20,8 @@ PRD.md
 DEPLOY_DASHBOARD.md
 IMPLEMENTATION_GUIDE.md
 
-# Screenshots
-*.png
+# Screenshots (temp)
+Screenshot*.png
 
 # Rust / Wasm build artifacts
 prefix-trie/target/
