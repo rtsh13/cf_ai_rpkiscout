@@ -300,7 +300,9 @@ fn score_risk(
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
 async fn handle_aggregate(mut req: Request) -> Result<Response> {
-    let body: AggregateRequest = req.json().await?;
+    let text = req.text().await?;
+    let body: AggregateRequest = serde_json::from_str(&text)
+        .map_err(|e| worker::Error::RustError(e.to_string()))?;
     let original: Vec<String> = body.prefixes.clone();
 
     let mut trie = PrefixTrie::new();
@@ -334,7 +336,9 @@ async fn handle_aggregate(mut req: Request) -> Result<Response> {
 }
 
 async fn handle_lpm(mut req: Request) -> Result<Response> {
-    let body: LpmRequest = req.json().await?;
+    let text = req.text().await?;
+    let body: LpmRequest = serde_json::from_str(&text)
+        .map_err(|e| worker::Error::RustError(e.to_string()))?;
 
     let ip_addr = match parse_ipv4(&body.ip) {
         Some(a) => a,
@@ -357,7 +361,9 @@ async fn handle_lpm(mut req: Request) -> Result<Response> {
 }
 
 async fn handle_specifics(mut req: Request) -> Result<Response> {
-    let body: SpecificsRequest = req.json().await?;
+    let text = req.text().await?;
+    let body: SpecificsRequest = serde_json::from_str(&text)
+        .map_err(|e| worker::Error::RustError(e.to_string()))?;
     let total_checked = body.prefixes.len();
     let mut candidates: Vec<HijackCandidate> = Vec::new();
 
