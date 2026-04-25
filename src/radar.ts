@@ -24,14 +24,21 @@ export interface ASNInfo {
 }
 
 export interface HijackEvent {
-  id: string;
-  hijackPrefix: string;
-  hijackerAsn: number;
-  hijackerAsnName: string;
-  peerAsns?: Array<{ asn: number; asnName: string }>;
-  detectedTs: string;
-  eventType: string;
-  maxHijackTs?: string;
+  id: number;
+  prefixes: string[];
+  hijacker_asn: number;
+  hijacker_country?: string;
+  victim_asns: number[];
+  victim_countries?: string[];
+  confidence_score: number;
+  min_hijack_ts: string;
+  max_hijack_ts?: string;
+  event_type: number;
+  on_going_count: number;
+  peer_asns?: number[];
+  peer_ip_count?: number;
+  is_stale?: boolean;
+  tags?: Array<{ name: string; score: number }>;
 }
 
 export interface HijackEventsResult {
@@ -40,14 +47,19 @@ export interface HijackEventsResult {
 }
 
 export interface LeakEvent {
-  id: string;
-  leakPrefix: string;
-  leakAsn: number;
-  leakAsnName: string;
-  originAsn?: number;
-  originAsnName?: string;
-  leakDetectedTs?: string;
-  detectedTs?: string;
+  id: number;
+  leak_asn: number;
+  leak_count: number;
+  leak_type: number;
+  leak_seg?: number[];
+  countries?: string[];
+  detected_ts: string;
+  min_ts?: string;
+  max_ts?: string;
+  prefix_count: number;
+  origin_count?: number;
+  peer_count?: number;
+  finished: boolean;
 }
 
 export interface LeakEventsResult {

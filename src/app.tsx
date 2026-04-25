@@ -233,12 +233,12 @@ function HijackCard({ data }: { data: { success: boolean; data?: HijackEventsRes
         <div className="events-empty">No BGP hijack events in the last 7 days.</div>
       ) : (
         <div className="events-table">
-          <div className="events-head"><span>PREFIX</span><span>HIJACKER</span><span>DETECTED</span></div>
+          <div className="events-head"><span>PREFIX</span><span>HIJACKER → VICTIM</span><span>DETECTED</span></div>
           {events.slice(0, 6).map((ev, idx) => (
             <div key={idx} className="events-row">
-              <span className="ev-prefix">{ev.hijackPrefix ?? "—"}</span>
-              <span className="ev-asn">AS{ev.hijackerAsn}{ev.hijackerAsnName ? ` · ${ev.hijackerAsnName}` : ""}</span>
-              <span className="ev-ts">{ev.detectedTs ? fmtTs(ev.detectedTs) : "—"}</span>
+              <span className="ev-prefix">{ev.prefixes?.[0] ?? "—"}</span>
+              <span className="ev-asn">AS{ev.hijacker_asn ?? "?"} → AS{ev.victim_asns?.[0] ?? "?"}</span>
+              <span className="ev-ts">{ev.min_hijack_ts ? fmtTs(ev.min_hijack_ts) : "—"}</span>
             </div>
           ))}
           {events.length > 6 && <div className="table-overflow">+{events.length - 6} more</div>}
@@ -265,12 +265,12 @@ function LeakCard({ data }: { data: { success: boolean; data?: LeakEventsResult 
         <div className="events-empty">No route leak events in the last 7 days.</div>
       ) : (
         <div className="events-table">
-          <div className="events-head"><span>PREFIX</span><span>LEAKER</span><span>DETECTED</span></div>
+          <div className="events-head"><span>LEAKER</span><span>PREFIXES / ORIGINS</span><span>DETECTED</span></div>
           {events.slice(0, 6).map((ev, idx) => (
             <div key={idx} className="events-row">
-              <span className="ev-prefix">{ev.leakPrefix ?? "—"}</span>
-              <span className="ev-asn">AS{ev.leakAsn}{ev.leakAsnName ? ` · ${ev.leakAsnName}` : ""}</span>
-              <span className="ev-ts">{(ev.leakDetectedTs ?? ev.detectedTs) ? fmtTs((ev.leakDetectedTs ?? ev.detectedTs)!) : "—"}</span>
+              <span className="ev-prefix">AS{ev.leak_asn ?? "?"}</span>
+              <span className="ev-asn">{ev.prefix_count ?? 0} prefixes · {ev.origin_count ?? 0} origins</span>
+              <span className="ev-ts">{ev.detected_ts ? fmtTs(ev.detected_ts) : "—"}</span>
             </div>
           ))}
           {events.length > 6 && <div className="table-overflow">+{events.length - 6} more</div>}
