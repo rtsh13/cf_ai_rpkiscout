@@ -212,6 +212,21 @@ async function streamWorkersAIResponse(
       } catch { /* skip */ }
     }
   }
+
+  // Flush remaining buffer — last SSE line may not end with \n
+  if (buffer.trim().startsWith("data: ")) {
+    const data = buffer.trim().slice(6).trim();
+    if (data && data !== "[DONE]") {
+      try {
+        const chunk = JSON.parse(data);
+        if (chunk.response) {
+          fullText += chunk.response;
+          send(ds.text(chunk.response));
+        }
+      } catch { /* skip */ }
+    }
+  }
+
   return fullText;
 }
 
