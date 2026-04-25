@@ -115,7 +115,7 @@ Respond with exactly this JSON schema:
 {"riskLevel":"LOW"|"MEDIUM"|"HIGH"|"CRITICAL","summary":"<2-3 sentences: one CISO-readable, one technical>","recommendations":["<actionable rec 1>","<actionable rec 2>","<actionable rec 3>"]}`;
 
         const aiResponse = (await this.env.AI.run(
-          "@cf/meta/llama-3.3-70b-instruct-fp8-fast" as BaseAiTextGenerationModels,
+          "@cf/meta/llama-3.3-70b-instruct-fp8-fast" as string,
           {
             messages: [
               { role: "system", content: systemPrompt },
