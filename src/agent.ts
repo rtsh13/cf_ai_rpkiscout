@@ -372,13 +372,13 @@ export class RPKIScoutAgent extends AIChatAgent<Env> {
               },
             ];
 
-            const explainResponse = (await env.AI.run(MODEL, {
+            const explainResponse = await env.AI.run(MODEL, {
               messages: explainMessages,
               max_tokens: 768,
-              stream: true,
-            })) as ReadableStream;
+            }) as { response?: string };
 
-            fullResponseText = await streamWorkersAIResponse(explainResponse, send);
+            fullResponseText = explainResponse.response ?? "";
+            if (fullResponseText) send(ds.text(fullResponseText));
 
           } else {
             // ── No tool calls — stream the text response directly ───────────
